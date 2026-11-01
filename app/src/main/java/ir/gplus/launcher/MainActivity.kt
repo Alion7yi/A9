@@ -30,7 +30,7 @@ class MainActivity : ComponentActivity() {
     override fun onResume() { super.onResume(); resumed.value = true }
     override fun onPause() { resumed.value = false; super.onPause() }
 
-    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         reloadKey.intValue++ // بعد از دادن اجازه، لیست کانال‌ها دوباره خوانده شود
     }
