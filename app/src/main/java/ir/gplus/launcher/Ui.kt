@@ -4,6 +4,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.graphics.BitmapFactory
 import android.graphics.Outline
 import android.media.tv.TvContract
 import android.media.tv.TvInputManager
@@ -30,6 +31,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
+import androidx.compose.ui.AbsoluteAlignment
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -42,6 +44,9 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.onKeyEvent
@@ -53,6 +58,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -68,7 +74,7 @@ import android.view.KeyEvent as AKey
 
 // ───────────── تنظیمات ظاهری ─────────────
 val Ink = Color(0xFF1F3A5F)
-val AppFont: FontFamily = FontFamily.Default   // فونت وزیرمتن را در res/font بگذارید و اینجا عوض کنید
+val LocalFont = compositionLocalOf<FontFamily> { FontFamily.Default }
 const val PREVIEW_VOLUME = 0f                  // صدای پیش‌نمایش داخل کادر (۰ = بی‌صدا، ۱ = صدا)
 
 enum class Screen { Home, Apps }
@@ -86,11 +92,15 @@ fun T(
     modifier: Modifier = Modifier, align: TextAlign? = null, maxLines: Int = 1
 ) = Text(
     text, modifier = modifier, color = color, fontSize = size.us, fontWeight = weight,
-    fontFamily = AppFont, textAlign = align, maxLines = maxLines, overflow = TextOverflow.Ellipsis
+    fontFamily = LocalFont.current, textAlign = align, maxLines = maxLines, overflow = TextOverflow.Ellipsis
 )
 
 @Composable fun VS(h: Int) = Spacer(Modifier.height(h.u))
 @Composable fun HS(w: Int) = Spacer(Modifier.width(w.u))
+
+@Composable
+fun Ico(res: Int, size: Int, tint: Color, modifier: Modifier = Modifier) =
+    Image(painterResource(res), null, modifier.size(size.u), colorFilter = ColorFilter.tint(tint))
 
 @Composable
 fun Modifier.glass(radius: Int, alpha: Float): Modifier {
@@ -122,7 +132,9 @@ fun FocusCard(modifier: Modifier, radius: Int = 18, onClick: () -> Unit, content
 // ───────────── ریشه ─────────────
 @Composable
 fun LauncherApp(resumed: Boolean, homeSignal: Int, reloadKey: Int) {
-    CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
+    val appCtx = LocalContext.current
+    val font = remember { loadFont(appCtx) }
+    CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl, LocalFont provides font) {
         BoxWithConstraints(Modifier.fillMaxSize()) {
             val sw = constraints.maxWidth
             val sh = constraints.maxHeight
@@ -285,7 +297,7 @@ private fun Launcher(sw: Int, sh: Int, resumed: Boolean, homeSignal: Int, reload
     val popular = remember(apps) {
         val byPkg = apps.associateBy { it.pkg }
         val pinned = PINNED.mapNotNull { byPkg[it] }.distinctBy { it.pkg }
-        (pinned + apps.filter { a -> pinned.none { it.pkg == a.pkg } }).take(7)
+        (pinned + apps.filter { a -> pinned.none { it.pkg == a.pkg } }).take(9)
     }
     val bgId = remember { ctx.resources.getIdentifier("bg", "drawable", ctx.packageName) }
     val logoId = remember { ctx.resources.getIdentifier("logo", "drawable", ctx.packageName) }
@@ -318,6 +330,7 @@ private fun Launcher(sw: Int, sh: Int, resumed: Boolean, homeSignal: Int, reload
         val cornerPx = with(density) { (24 * uu).dp.toPx() }
         Box(
             Modifier
+                .align(AbsoluteAlignment.TopLeft)
                 .absoluteOffset { IntOffset(r.left.roundToInt(), r.top.roundToInt()) }
                 .size(if (showVideo) w else 0.dp, if (showVideo) h else 0.dp)
         ) {
@@ -388,8 +401,10 @@ private fun Launcher(sw: Int, sh: Int, resumed: Boolean, homeSignal: Int, reload
 // ───────────── پس‌زمینه ─────────────
 @Composable
 private fun Background(bgId: Int) {
-    if (bgId != 0) {
-        Image(painterResource(bgId), null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+    val ctx = LocalContext.current
+    val bmp = remember(bgId) { if (bgId != 0) loadScaled(ctx, bgId, 1920) else null }
+    if (bmp != null) {
+        Image(bmp, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
     } else {
         Box(
             Modifier.fillMaxSize()
@@ -421,8 +436,6 @@ private fun HomeScreen(
             Sidebar(Modifier.width(180.u).fillMaxHeight(), onFullscreen, onApps, onSettings)
             HS(24)
             Column(Modifier.weight(1f).fillMaxHeight()) {
-                InputChips(inputs, inputId, onSelectInput)
-                VS(8)
                 Box(
                     Modifier.weight(1f).fillMaxWidth()
                         .onGloballyPositioned { onTileBounds(it.boundsInRoot()) }
@@ -437,10 +450,9 @@ private fun HomeScreen(
         VS(14)
         T("برنامه‌های محبوب", 16, weight = FontWeight.Medium)
         VS(8)
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.u)) {
-            popular.forEach { a -> AppTile(a, Modifier.weight(1f)) { onLaunch(a) } }
-            repeat(7 - popular.size) { Spacer(Modifier.weight(1f)) }
-            FocusCard(Modifier.weight(1f).height(100.u), 18, onApps) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(26.u)) {
+            popular.forEach { a -> AppTile(a, Modifier.width(96.u)) { onLaunch(a) } }
+            FocusCard(Modifier.width(96.u).height(100.u), 18, onApps) {
                 Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
                     T("＋", 32); T("بیشتر", 12)
                 }
@@ -459,22 +471,22 @@ private fun TopBar(now: Date, online: Boolean, logoId: Int, onSearch: () -> Unit
                 Modifier.size(46.u).clip(RoundedCornerShape(12.u))
                     .background(Brush.linearGradient(listOf(Color(0xFF2F80ED), Color(0xFF56CCF2)))),
                 contentAlignment = Alignment.Center
-            ) { T("G+", 20, Color.White, FontWeight.Bold) }
+            ) { T("\u200EG+\u200E", 20, Color.White, FontWeight.Bold) }
             HS(10)
             T("G Plus", 24, Ink, FontWeight.Bold)
         }
         HS(32)
         FocusCard(Modifier.width(470.u).height(46.u), 23, onSearch) {
             Row(Modifier.fillMaxSize().padding(horizontal = 16.u), verticalAlignment = Alignment.CenterVertically) {
-                T("🔍", 18); HS(10)
+                Ico(R.drawable.ic_search, 20, Ink.copy(0.75f)); HS(10)
                 T("جستجوی برنامه‌ها، فیلم‌ها و بازی‌ها…", 14, Ink.copy(0.75f))
             }
         }
         Spacer(Modifier.weight(1f))
-        T("📶", 22, modifier = Modifier.alpha(if (online) 1f else 0.3f))
+        Ico(R.drawable.ic_wifi, 30, Ink, Modifier.alpha(if (online) 1f else 0.3f))
         HS(16)
         FocusCard(Modifier.size(44.u), 22, onSettings) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { T("⚙️", 20) }
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Ico(R.drawable.ic_settings, 26, Ink) }
         }
         HS(18)
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -487,15 +499,15 @@ private fun TopBar(now: Date, online: Boolean, logoId: Int, onSearch: () -> Unit
 @Composable
 private fun Sidebar(modifier: Modifier, onLive: () -> Unit, onApps: () -> Unit, onSettings: () -> Unit) {
     Column(modifier.glass(24, 0.22f).padding(10.u), verticalArrangement = Arrangement.spacedBy(8.u)) {
-        SideItem("🏠", "خانه", true) {}
-        SideItem("📺", "تلویزیون زنده", false, onLive)
-        SideItem("🧩", "برنامه‌ها", false, onApps)
-        SideItem("⚙️", "تنظیمات", false, onSettings)
+        SideItem(R.drawable.ic_home, "خانه", true) {}
+        SideItem(R.drawable.ic_tv, "تلویزیون زنده", false, onLive)
+        SideItem(R.drawable.ic_apps, "برنامه‌ها", false, onApps)
+        SideItem(R.drawable.ic_settings, "تنظیمات", false, onSettings)
     }
 }
 
 @Composable
-private fun SideItem(icon: String, text: String, selected: Boolean, onClick: () -> Unit) {
+private fun SideItem(icon: Int, text: String, selected: Boolean, onClick: () -> Unit) {
     var focused by remember { mutableStateOf(false) }
     val shape = RoundedCornerShape(16.u)
     Row(
@@ -510,7 +522,7 @@ private fun SideItem(icon: String, text: String, selected: Boolean, onClick: () 
             .padding(horizontal = 14.u),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        T(icon, 22); HS(12)
+        Ico(icon, 26, if (selected) Color.White else Ink); HS(12)
         T(text, 16, if (selected) Color.White else Ink, if (selected) FontWeight.Medium else FontWeight.Normal)
     }
 }
@@ -537,7 +549,15 @@ private fun InputChips(inputs: List<TvInput>, selected: String?, onPick: (String
 
 @Composable
 private fun WeatherCard(modifier: Modifier, w: Weather?) {
-    Column(modifier.glass(24, 0.26f).padding(20.u)) {
+    val ctx = LocalContext.current
+    val wid = remember { ctx.resources.getIdentifier("weather_bg", "drawable", ctx.packageName) }
+    val wbmp = remember(wid) { if (wid != 0) loadScaled(ctx, wid, 800) else null }
+    Box(modifier.glass(24, 0.26f)) {
+    if (wbmp != null) {
+        Image(wbmp, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+        Box(Modifier.fillMaxSize().background(Color.White.copy(0.3f)))
+    }
+    Column(Modifier.fillMaxSize().padding(20.u)) {
         T("📍 ساری، ایران", 16)
         VS(14)
         if (w == null) {
@@ -566,15 +586,16 @@ private fun WeatherCard(modifier: Modifier, w: Weather?) {
             VS(6)
         }
     }
+    }
 }
 
 @Composable
 private fun AppTile(a: AppEntry, modifier: Modifier, onClick: () -> Unit) {
     FocusCard(modifier.height(100.u), 18, onClick) {
         Column(Modifier.fillMaxSize().padding(horizontal = 6.u), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
-            Image(a.icon, null, Modifier.size(46.u).clip(RoundedCornerShape(10.u)))
+            Image(a.icon, null, Modifier.size(52.u).clip(RoundedCornerShape(12.u)))
             VS(6)
-            T(a.label, 12, align = TextAlign.Center)
+            T(a.label, 11, align = TextAlign.Center)
         }
     }
 }
@@ -663,3 +684,26 @@ private fun InputPicker(inputs: List<TvInput>, selected: String?, onPick: (Strin
         }
     }
 }
+
+
+// ───────────── فونت و تصاویر ─────────────
+/** اگر فایل‌های diplomat.ttf (و اختیاری diplomat_bold.ttf) در res/font باشند استفاده می‌شوند. */
+private fun loadFont(ctx: Context): FontFamily {
+    val r = ctx.resources
+    val reg = r.getIdentifier("diplomat", "font", ctx.packageName)
+    val bold = r.getIdentifier("diplomat_bold", "font", ctx.packageName)
+    val list = mutableListOf<Font>()
+    if (reg != 0) list += Font(reg, FontWeight.Normal)
+    if (bold != 0) list += Font(bold, FontWeight.Bold)
+    return if (list.isEmpty()) FontFamily.Default else FontFamily(list)
+}
+
+/** عکس بزرگ (حتی 4K) را کوچک‌تر می‌خواند تا حافظه‌ی تلویزیون پر نشود. */
+private fun loadScaled(ctx: Context, resId: Int, maxW: Int): ImageBitmap? = runCatching {
+    val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeResource(ctx.resources, resId, o)
+    var sample = 1
+    while (o.outWidth / (sample * 2) >= maxW) sample *= 2
+    val o2 = BitmapFactory.Options().apply { inSampleSize = sample }
+    BitmapFactory.decodeResource(ctx.resources, resId, o2)?.asImageBitmap()
+}.getOrNull()
