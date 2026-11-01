@@ -4,6 +4,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
 import android.graphics.Outline
 import android.media.tv.TvContract
@@ -50,6 +51,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.boundsInRoot
@@ -155,6 +157,10 @@ private fun Launcher(sw: Int, sh: Int, resumed: Boolean, homeSignal: Int, reload
     var screen by remember { mutableStateOf(Screen.Home) }
     var fullscreen by remember { mutableStateOf(false) }
     var showPicker by remember { mutableStateOf(false) }
+    var tunerBlocked by remember { mutableStateOf(false) }
+    var pinnedList by remember {
+        mutableStateOf<List<String>?>(prefs.getString("pinned", null)?.split(",")?.filter { it.isNotBlank() })
+    }
     var status by remember { mutableStateOf("") }
     var ping by remember { mutableIntStateOf(0) }
     var overlayShown by remember { mutableStateOf(true) }
@@ -238,9 +244,14 @@ private fun Launcher(sw: Int, sh: Int, resumed: Boolean, homeSignal: Int, reload
             channels.getOrNull(chIdx)?.let { TvContract.buildChannelUri(it.id) }
         }
         if (uri == null) {
-            status = "کانالی پیدا نشد (اسکن کانال یا اجازه‌ی خواندن کانال‌ها لازم است)"
+            tunerBlocked = true
+            val hasPerm = ctx.checkSelfPermission("com.android.providers.tv.permission.READ_EPG_DATA") ==
+                PackageManager.PERMISSION_GRANTED
+            status = if (!hasPerm) "اجازه‌ی خواندن کانال‌ها داده نشده است"
+            else "این تلویزیون لیست کانال‌های آنتن را به برنامه‌های دیگر نمی‌دهد"
             tvView.reset()
         } else {
+            tunerBlocked = false
             status = ""
             tvView.tune(inp.id, uri)
         }
@@ -283,8 +294,8 @@ private fun Launcher(sw: Int, sh: Int, resumed: Boolean, homeSignal: Int, reload
     LaunchedEffect(homeSignal) {
         if (homeSignal > 0) { fullscreen = false; showPicker = false; screen = Screen.Home }
     }
-    LaunchedEffect(fullscreen, screen) {
-        if (!fullscreen && screen == Screen.Home) { delay(150); runCatching { tileFr.requestFocus() } }
+    LaunchedEffect(fullscreen, screen, showPicker) {
+        if (!fullscreen && screen == Screen.Home && !showPicker) { delay(150); runCatching { tileFr.requestFocus() } }
     }
     BackHandler(enabled = showPicker || fullscreen || screen != Screen.Home) {
         when {
@@ -294,10 +305,29 @@ private fun Launcher(sw: Int, sh: Int, resumed: Boolean, homeSignal: Int, reload
         }
     }
 
-    val popular = remember(apps) {
+    val popular = remember(apps, pinnedList) {
         val byPkg = apps.associateBy { it.pkg }
-        val pinned = PINNED.mapNotNull { byPkg[it] }.distinctBy { it.pkg }
-        (pinned + apps.filter { a -> pinned.none { it.pkg == a.pkg } }).take(9)
+        val saved = pinnedList
+        if (saved != null) {
+            saved.mapNotNull { byPkg[it] }.take(9)
+        } else {
+            val pinned = PINNED.mapNotNull { byPkg[it] }.distinctBy { it.pkg }
+            (pinned + apps.filter { a -> pinned.none { it.pkg == a.pkg } }).take(9)
+        }
+    }
+    val liveApp = remember(apps) { findLiveApp(apps) }
+    fun togglePin(pkg: String) {
+        val cur = (pinnedList ?: popular.map { it.pkg }).toMutableList()
+        if (!cur.remove(pkg) && cur.size < 9) cur.add(pkg)
+        pinnedList = cur
+        prefs.edit().putString("pinned", cur.joinToString(",")).apply()
+    }
+    fun resetPins() {
+        pinnedList = null
+        prefs.edit().remove("pinned").apply()
+    }
+    fun openLive() {
+        if (tunerBlocked && liveApp != null) launchApp(ctx, liveApp) else fullscreen = true
     }
     val bgId = remember { ctx.resources.getIdentifier("bg", "drawable", ctx.packageName) }
     val logoId = remember { ctx.resources.getIdentifier("logo", "drawable", ctx.packageName) }
@@ -309,16 +339,16 @@ private fun Launcher(sw: Int, sh: Int, resumed: Boolean, homeSignal: Int, reload
             when (screen) {
                 Screen.Home -> HomeScreen(
                     now, online, weather, inputs, inputId, popular, logoId, tileFr,
-                    onSelectInput = { selectInput(it) },
+                    onPickInput = { showPicker = true },
                     onTileBounds = { tileRect = it },
                     onTileFocus = { tileFocused = it },
-                    onFullscreen = { fullscreen = true },
+                    onFullscreen = { openLive() },
                     onApps = { screen = Screen.Apps },
                     onSettings = { openSettings(ctx) },
                     onSearch = { runCatching { ctx.startActivity(Intent(Intent.ACTION_ASSIST).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) } },
                     onLaunch = { launchApp(ctx, it) }
                 )
-                Screen.Apps -> AppsScreen(apps) { launchApp(ctx, it) }
+                Screen.Apps -> AppsScreen(apps, popular.map { it.pkg }, { togglePin(it) }, { resetPins() }) { launchApp(ctx, it) }
             }
         }
 
@@ -351,12 +381,14 @@ private fun Launcher(sw: Int, sh: Int, resumed: Boolean, homeSignal: Int, reload
             )
             if (showVideo) {
                 val cur = inputs.firstOrNull { it.id == inputId }
+                val shownStatus = if (tunerBlocked && liveApp != null && !fullscreen)
+                    status + "\nبرای تماشا OK را بزنید (برنامه‌ی تلویزیون باز می‌شود)" else status
                 val chName = if (cur?.passthrough == false)
                     channels.getOrNull(chIdx)?.let { "${it.number}  ${it.name}" }.orEmpty() else ""
                 Box(
                     Modifier.fillMaxSize().then(if (fullscreen) Modifier else Modifier.clip(RoundedCornerShape(24.u)))
                 ) {
-                    LiveOverlay(cur?.label ?: "—", chName, status, !fullscreen || overlayShown, fullscreen)
+                    LiveOverlay(cur?.label ?: "—", chName, shownStatus, !fullscreen || overlayShown, fullscreen, tileFocused)
                 }
                 if (!fullscreen && tileFocused) {
                     Box(Modifier.fillMaxSize().border(4.u, Color.White, RoundedCornerShape(24.u)))
@@ -391,9 +423,9 @@ private fun Launcher(sw: Int, sh: Int, resumed: Boolean, homeSignal: Int, reload
             LaunchedEffect(showPicker) {
                 if (!showPicker) { delay(60); runCatching { fr.requestFocus() } }
             }
-            if (showPicker) {
-                InputPicker(inputs, inputId) { selectInput(it); showPicker = false }
-            }
+        }
+        if (showPicker) {
+            InputPicker(inputs, inputId) { selectInput(it); showPicker = false }
         }
     }
 }
@@ -425,10 +457,11 @@ private fun Background(bgId: Int) {
 private fun HomeScreen(
     now: Date, online: Boolean, weather: Weather?, inputs: List<TvInput>, inputId: String?,
     popular: List<AppEntry>, logoId: Int, tileFr: FocusRequester,
-    onSelectInput: (String) -> Unit, onTileBounds: (Rect) -> Unit, onTileFocus: (Boolean) -> Unit,
+    onPickInput: () -> Unit, onTileBounds: (Rect) -> Unit, onTileFocus: (Boolean) -> Unit,
     onFullscreen: () -> Unit, onApps: () -> Unit, onSettings: () -> Unit, onSearch: () -> Unit,
     onLaunch: (AppEntry) -> Unit
 ) {
+    val longPressed = remember { mutableStateOf(false) }
     Column(Modifier.fillMaxSize().padding(horizontal = 40.u, vertical = 20.u)) {
         TopBar(now, online, logoId, onSearch, onSettings)
         VS(14)
@@ -439,6 +472,19 @@ private fun HomeScreen(
                 Box(
                     Modifier.weight(1f).fillMaxWidth()
                         .onGloballyPositioned { onTileBounds(it.boundsInRoot()) }
+                        .onPreviewKeyEvent { ev ->
+                            val code = ev.nativeKeyEvent.keyCode
+                            val center = code == AKey.KEYCODE_DPAD_CENTER || code == AKey.KEYCODE_ENTER
+                            when {
+                                code == AKey.KEYCODE_MENU && ev.type == KeyEventType.KeyDown -> { onPickInput(); true }
+                                center && ev.type == KeyEventType.KeyDown && ev.nativeKeyEvent.repeatCount > 0 -> {
+                                    if (!longPressed.value) { longPressed.value = true; onPickInput() }
+                                    true
+                                }
+                                center && ev.type == KeyEventType.KeyUp && longPressed.value -> { longPressed.value = false; true }
+                                else -> false
+                            }
+                        }
                         .focusRequester(tileFr)
                         .onFocusChanged { onTileFocus(it.isFocused) }
                         .tap(onFullscreen)
@@ -590,35 +636,67 @@ private fun WeatherCard(modifier: Modifier, w: Weather?) {
 }
 
 @Composable
-private fun AppTile(a: AppEntry, modifier: Modifier, onClick: () -> Unit) {
+private fun AppTile(a: AppEntry, modifier: Modifier, badge: Boolean = false, onClick: () -> Unit) {
     FocusCard(modifier.height(100.u), 18, onClick) {
         Column(Modifier.fillMaxSize().padding(horizontal = 6.u), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
             Image(a.icon, null, Modifier.size(52.u).clip(RoundedCornerShape(12.u)))
             VS(6)
             T(a.label, 11, align = TextAlign.Center)
         }
+        if (badge) {
+            Box(
+                Modifier.align(Alignment.TopStart).padding(6.u).size(22.u).clip(CircleShape).background(Color(0xFF3D8BFF)),
+                contentAlignment = Alignment.Center
+            ) { T("✓", 14, Color.White, FontWeight.Bold) }
+        }
     }
 }
 
 @Composable
-private fun AppsScreen(apps: List<AppEntry>, onLaunch: (AppEntry) -> Unit) {
+private fun AppsScreen(
+    apps: List<AppEntry>, pinned: List<String>,
+    onToggle: (String) -> Unit, onReset: () -> Unit, onLaunch: (AppEntry) -> Unit
+) {
+    var edit by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxSize().padding(horizontal = 40.u, vertical = 28.u)) {
-        T("همه‌ی برنامه‌ها", 26, weight = FontWeight.Bold)
-        VS(18)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            T("همه‌ی برنامه‌ها", 26, weight = FontWeight.Bold)
+            Spacer(Modifier.weight(1f))
+            if (edit) {
+                FocusCard(Modifier.height(44.u).width(150.u), 22, onReset) {
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { T("برگشت به پیش‌فرض", 13) }
+                }
+                HS(12)
+            }
+            FocusCard(Modifier.height(44.u).width(if (edit) 120.u else 260.u), 22, { edit = !edit }) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    T(if (edit) "پایان" else "انتخاب برنامه‌های محبوب", 14, Ink, FontWeight.Medium)
+                }
+            }
+        }
+        if (edit) {
+            VS(8)
+            T("روی هر برنامه بزنید تا به صفحه‌ی اصلی اضافه یا حذف شود (حداکثر ۹ برنامه). ترتیب نمایش همان ترتیب انتخاب شماست.", 13, Ink.copy(0.85f), maxLines = 2)
+        }
+        VS(14)
         LazyVerticalGrid(
             GridCells.Fixed(6),
             horizontalArrangement = Arrangement.spacedBy(14.u),
             verticalArrangement = Arrangement.spacedBy(14.u),
             contentPadding = PaddingValues(8.u)
         ) {
-            items(apps, key = { it.pkg }) { a -> AppTile(a, Modifier.fillMaxWidth()) { onLaunch(a) } }
+            items(apps, key = { it.pkg }) { a ->
+                AppTile(a, Modifier.fillMaxWidth(), badge = edit && a.pkg in pinned) {
+                    if (edit) onToggle(a.pkg) else onLaunch(a)
+                }
+            }
         }
     }
 }
 
 // ───────────── روی ویدیو ─────────────
 @Composable
-private fun LiveOverlay(inputLabel: String, channel: String, status: String, chrome: Boolean, fullscreen: Boolean) {
+private fun LiveOverlay(inputLabel: String, channel: String, status: String, chrome: Boolean, fullscreen: Boolean, hint: Boolean) {
     val dark = Color(0x99000000)
     Box(Modifier.fillMaxSize()) {
         if (chrome) {
@@ -641,6 +719,7 @@ private fun LiveOverlay(inputLabel: String, channel: String, status: String, chr
             ) {
                 Column {
                     T(if (channel.isNotEmpty()) channel else inputLabel, if (fullscreen) 22 else 17, Color.White, FontWeight.Bold)
+                    if (hint && !fullscreen) T("OK: تمام‌صفحه   •   OK را نگه دارید: انتخاب ورودی", 11, Color.White.copy(0.85f))
                     if (fullscreen) T("OK: انتخاب ورودی   •   بالا/پایین یا CH: تغییر کانال   •   Back: بازگشت", 12, Color.White.copy(0.8f))
                 }
             }

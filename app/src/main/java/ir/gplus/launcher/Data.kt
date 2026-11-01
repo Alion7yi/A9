@@ -166,3 +166,11 @@ fun wmo(code: Int): Pair<String, String> = when (code) {
     95, 96, 99 -> "⛈️" to "رعدوبرق"
     else -> "☁️" to "—"
 }
+
+/** برنامه‌ی تلویزیونِ خودِ دستگاه (برای وقتی که پیش‌نمایش آنتن داخل لانچر ممکن نیست). */
+val LIVE_PKGS = listOf("com.google.android.tv", "com.android.tv", "com.mediatek.wwtv.tvcenter")
+
+fun findLiveApp(apps: List<AppEntry>): AppEntry? =
+    apps.firstOrNull { it.label.equals("Live TV", ignoreCase = true) }
+        ?: apps.firstOrNull { it.pkg in LIVE_PKGS }
+        ?: apps.firstOrNull { it.label.contains("live", true) && it.label.contains("tv", true) }
