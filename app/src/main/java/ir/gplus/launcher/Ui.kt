@@ -89,7 +89,9 @@ import kotlin.math.roundToInt
 import android.view.KeyEvent as AKey
 
 // ───────────── تنظیمات ظاهری ─────────────
-val Ink = Color(0xFF1F3A5F)
+val LocalDark = compositionLocalOf { false }
+val Ink: Color
+    @Composable get() = if (LocalDark.current) Color.White else Color(0xFF1F3A5F)
 val LocalFont = compositionLocalOf<FontFamily> { FontFamily.Default }
 const val LIVE_PREVIEW = false   // false = به‌جای پخش زنده، انیمیشن لوپ نشان بده
 const val PREVIEW_VOLUME = 0f                  // صدای پیش‌نمایش داخل کادر (۰ = بی‌صدا، ۱ = صدا)
@@ -122,7 +124,9 @@ fun Ico(res: Int, size: Int, tint: Color, modifier: Modifier = Modifier) =
 @Composable
 fun Modifier.glass(radius: Int, alpha: Float): Modifier {
     val s = RoundedCornerShape(radius.u)
-    return this.clip(s).background(Color.White.copy(alpha)).border(1.u, Color.White.copy(0.55f), s)
+    val dk = LocalDark.current
+    return this.clip(s).background(Color.White.copy(if (dk) alpha * 0.45f else alpha))
+        .border(1.u, Color.White.copy(if (dk) 0.3f else 0.55f), s)
 }
 
 @Composable
@@ -134,12 +138,13 @@ fun FocusCard(modifier: Modifier, radius: Int = 18, onClick: () -> Unit, content
     var focused by remember { mutableStateOf(false) }
     val scale by animateFloatAsState(if (focused) 1.07f else 1f, label = "scale")
     val shape = RoundedCornerShape(radius.u)
+    val dk = LocalDark.current
     Box(
         modifier
             .graphicsLayer { scaleX = scale; scaleY = scale }
             .clip(shape)
-            .background(Color.White.copy(if (focused) 0.6f else 0.28f))
-            .border(if (focused) 3.u else 1.u, Color.White.copy(if (focused) 1f else 0.55f), shape)
+            .background(Color.White.copy(if (dk) (if (focused) 0.32f else 0.12f) else (if (focused) 0.6f else 0.28f)))
+            .border(if (focused) 3.u else 1.u, Color.White.copy(if (focused) 1f else (if (dk) 0.3f else 0.55f)), shape)
             .onFocusChanged { focused = it.isFocused }
             .tap(onClick),
         content = { content(focused) }
@@ -151,19 +156,20 @@ fun FocusCard(modifier: Modifier, radius: Int = 18, onClick: () -> Unit, content
 fun LauncherApp(resumed: Boolean, homeSignal: Int, reloadKey: Int) {
     val appCtx = LocalContext.current
     val font = remember { loadFont(appCtx) }
-    CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl, LocalFont provides font) {
+    var dark by remember { mutableStateOf(false) }
+    CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl, LocalFont provides font, LocalDark provides dark) {
         BoxWithConstraints(Modifier.fillMaxSize()) {
             val sw = constraints.maxWidth
             val sh = constraints.maxHeight
             CompositionLocalProvider(LocalU provides maxWidth.value / 1280f) {
-                Launcher(sw, sh, resumed, homeSignal, reloadKey)
+                Launcher(sw, sh, resumed, homeSignal, reloadKey) { dark = it }
             }
         }
     }
 }
 
 @Composable
-private fun Launcher(sw: Int, sh: Int, resumed: Boolean, homeSignal: Int, reloadKey: Int) {
+private fun Launcher(sw: Int, sh: Int, resumed: Boolean, homeSignal: Int, reloadKey: Int, onDark: (Boolean) -> Unit) {
     val ctx = LocalContext.current
     val density = LocalDensity.current
     val uu = LocalU.current
@@ -172,6 +178,7 @@ private fun Launcher(sw: Int, sh: Int, resumed: Boolean, homeSignal: Int, reload
     var screen by remember { mutableStateOf(Screen.Home) }
     var fullscreen by remember { mutableStateOf(false) }
     var showPicker by remember { mutableStateOf(false) }
+    var showWalls by remember { mutableStateOf(false) }
     var tunerBlocked by remember { mutableStateOf(false) }
     var guessed by remember { mutableStateOf(false) }
     var pinnedList by remember {
@@ -310,13 +317,14 @@ private fun Launcher(sw: Int, sh: Int, resumed: Boolean, homeSignal: Int, reload
     }
     // دکمه Home
     LaunchedEffect(homeSignal) {
-        if (homeSignal > 0) { fullscreen = false; showPicker = false; screen = Screen.Home }
+        if (homeSignal > 0) { fullscreen = false; showPicker = false; showWalls = false; screen = Screen.Home }
     }
-    LaunchedEffect(fullscreen, screen, showPicker) {
-        if (!fullscreen && screen == Screen.Home && !showPicker) { delay(150); runCatching { tileFr.requestFocus() } }
+    LaunchedEffect(fullscreen, screen, showPicker, showWalls) {
+        if (!fullscreen && screen == Screen.Home && !showPicker && !showWalls) { delay(150); runCatching { tileFr.requestFocus() } }
     }
-    BackHandler(enabled = showPicker || fullscreen || screen != Screen.Home) {
+    BackHandler(enabled = showWalls || showPicker || fullscreen || screen != Screen.Home) {
         when {
+            showWalls -> showWalls = false
             showPicker -> showPicker = false
             fullscreen -> fullscreen = false
             else -> screen = Screen.Home
@@ -350,10 +358,24 @@ private fun Launcher(sw: Int, sh: Int, resumed: Boolean, homeSignal: Int, reload
             else Toast.makeText(ctx, "برنامه‌ی تلویزیون پیدا نشد", Toast.LENGTH_SHORT).show()
         } else if (tunerBlocked && liveApp != null) launchApp(ctx, liveApp) else fullscreen = true
     }
-    val bgId = remember { findRes(ctx, "drawable", listOf("bg", "background", "wallpaper")) }
+    val walls = remember {
+        (listOf("bg") + (1..20).map { "bg_$it" }).mapNotNull { n ->
+            val id = findRes(ctx, "drawable", listOf(n))
+            if (id != 0) n to id else null
+        }
+    }
+    var wallName by remember { mutableStateOf<String?>(prefs.getString("wallpaper", null)) }
+    val bgId = when (wallName) {
+        "none" -> 0
+        else -> walls.firstOrNull { it.first == wallName }?.second
+            ?: walls.firstOrNull { it.first == "bg" }?.second
+            ?: walls.firstOrNull()?.second ?: 0
+    }
+    val darkBg = remember(bgId) { isDarkRes(ctx, bgId) }
+    LaunchedEffect(darkBg) { onDark(darkBg) }
     LaunchedEffect(Unit) {
         val missing = buildList {
-            if (bgId == 0) add("پس‌زمینه (bg)")
+            if (walls.isEmpty()) add("پس‌زمینه (bg)")
             if (findRes(ctx, "drawable", WEATHER_NAMES) == 0) add("عکس هوا (weather_bg)")
             if (findRes(ctx, "font", DIPLOMAT_NAMES) == 0) add("فونت (diplomat)")
         }
@@ -378,6 +400,7 @@ private fun Launcher(sw: Int, sh: Int, resumed: Boolean, homeSignal: Int, reload
                     onApps = { screen = Screen.Apps },
                     onSettings = { openSettings(ctx) },
                     onSearch = { runCatching { ctx.startActivity(Intent(Intent.ACTION_ASSIST).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) } },
+                    onWallpaper = { showWalls = true },
                     onLaunch = { launchApp(ctx, it) }
                 )
                 Screen.Apps -> AppsScreen(apps, popular.map { it.pkg }, { togglePin(it) }, { resetPins() }) { launchApp(ctx, it) }
@@ -463,6 +486,12 @@ private fun Launcher(sw: Int, sh: Int, resumed: Boolean, homeSignal: Int, reload
                 if (!showPicker) { delay(60); runCatching { fr.requestFocus() } }
             }
         }
+        if (showWalls) {
+            WallpaperPicker(walls, wallName ?: "bg") { n ->
+                wallName = n
+                prefs.edit().putString("wallpaper", n).apply()
+            }
+        }
         if (showPicker) {
             InputPicker(inputs, inputId, onOpenLive = liveApp?.let { app -> { showPicker = false; launchApp(ctx, app) } }) { selectInput(it); showPicker = false }
         }
@@ -498,12 +527,13 @@ private fun HomeScreen(
     popular: List<AppEntry>, logoId: Int, tileFr: FocusRequester, resumed: Boolean,
     onPickInput: () -> Unit, onTileBounds: (Rect) -> Unit, onTileFocus: (Boolean) -> Unit,
     onFullscreen: () -> Unit, onApps: () -> Unit, onSettings: () -> Unit, onSearch: () -> Unit,
+    onWallpaper: () -> Unit,
     onLaunch: (AppEntry) -> Unit
 ) {
     val longPressed = remember { mutableStateOf(false) }
     val tileHasFocus = remember { mutableStateOf(false) }
     Column(Modifier.fillMaxSize().padding(horizontal = 40.u, vertical = 20.u)) {
-        TopBar(now, online, logoId, onSearch, onSettings)
+        TopBar(now, online, logoId, onSearch, onWallpaper, onSettings)
         VS(14)
         Row(Modifier.fillMaxWidth().height(431.u)) {
             Sidebar(Modifier.width(180.u).fillMaxHeight(), onFullscreen, onApps, onSettings)
@@ -550,7 +580,7 @@ private fun HomeScreen(
 }
 
 @Composable
-private fun TopBar(now: Date, online: Boolean, logoId: Int, onSearch: () -> Unit, onSettings: () -> Unit) {
+private fun TopBar(now: Date, online: Boolean, logoId: Int, onSearch: () -> Unit, onWallpaper: () -> Unit, onSettings: () -> Unit) {
     Row(Modifier.fillMaxWidth().height(60.u), verticalAlignment = Alignment.CenterVertically) {
         if (logoId != 0) {
             Image(painterResource(logoId), null, Modifier.height(46.u))
@@ -573,6 +603,10 @@ private fun TopBar(now: Date, online: Boolean, logoId: Int, onSearch: () -> Unit
         Spacer(Modifier.weight(1f))
         Ico(R.drawable.ic_wifi, 30, Ink, Modifier.alpha(if (online) 1f else 0.3f))
         HS(16)
+        FocusCard(Modifier.size(44.u), 22, onWallpaper) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Ico(R.drawable.ic_wallpaper, 24, Ink) }
+        }
+        HS(12)
         FocusCard(Modifier.size(44.u), 22, onSettings) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Ico(R.drawable.ic_settings, 26, Ink) }
         }
@@ -602,7 +636,7 @@ private fun SideItem(icon: Int, text: String, selected: Boolean, onClick: () -> 
         Modifier.fillMaxWidth().height(60.u).clip(shape)
             .then(
                 if (selected) Modifier.background(Brush.horizontalGradient(listOf(Color(0xFF3D8BFF), Color(0xFF7FBDFF))))
-                else Modifier.background(Color.White.copy(if (focused) 0.5f else 0f))
+                else Modifier.background(Color.White.copy(if (focused) (if (LocalDark.current) 0.25f else 0.5f) else 0f))
             )
             .then(if (focused) Modifier.border(3.u, Color.White, shape) else Modifier)
             .onFocusChanged { focused = it.isFocused }
@@ -643,8 +677,10 @@ private fun WeatherCard(modifier: Modifier, w: Weather?) {
     Box(modifier.glass(24, 0.26f)) {
     if (wbmp != null) {
         Image(wbmp, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
-        Box(Modifier.fillMaxSize().background(Color.White.copy(0.3f)))
+        Box(Modifier.fillMaxSize().background(if (isDarkRes(ctx, wid)) Color.Black.copy(0.25f) else Color.White.copy(0.3f)))
     }
+    val wDark = remember(wid) { isDarkRes(ctx, wid) }
+    CompositionLocalProvider(LocalDark provides (if (wbmp != null) wDark else LocalDark.current)) {
     Column(Modifier.fillMaxSize().padding(20.u)) {
         T("📍 ساری، ایران", 16)
         VS(14)
@@ -673,6 +709,7 @@ private fun WeatherCard(modifier: Modifier, w: Weather?) {
             }
             VS(6)
         }
+    }
     }
     }
 }
@@ -987,6 +1024,75 @@ private fun DefaultLoopScene(modifier: Modifier) {
             val x = (((i * 0.37f) + t * 3) % 1f) * (w + cw * 2) - cw
             val y = h * (0.55f + 0.1f * i)
             drawOval(Color.White.copy(0.28f), Offset(x, y), Size(cw, cw * 0.22f))
+        }
+    }
+}
+
+/** میانگین روشنایی عکس؛ برای انتخاب رنگ نوشته‌ها (روشن/تیره). */
+private fun isDarkRes(ctx: Context, resId: Int): Boolean {
+    if (resId == 0) return false
+    return runCatching {
+        val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeResource(ctx.resources, resId, o)
+        var sample = 1
+        while (o.outWidth > 0 && o.outWidth / (sample * 2) >= 64) sample *= 2
+        val b = BitmapFactory.decodeResource(ctx.resources, resId, BitmapFactory.Options().apply { inSampleSize = sample })!!
+        var sum = 0.0
+        var n = 0
+        for (y in 0 until b.height) for (x in 0 until b.width) {
+            val c = b.getPixel(x, y)
+            sum += 0.2126 * ((c shr 16) and 0xFF) + 0.7152 * ((c shr 8) and 0xFF) + 0.0722 * (c and 0xFF)
+            n++
+        }
+        (sum / n / 255.0) < 0.42
+    }.getOrDefault(false)
+}
+
+@Composable
+private fun WallpaperPicker(walls: List<Pair<String, Int>>, selected: String, onPick: (String) -> Unit) {
+    val ctx = LocalContext.current
+    val fr = remember { FocusRequester() }
+    val entries = listOf("none" to 0) + walls
+    val cur = if (entries.any { it.first == selected }) selected else (walls.firstOrNull()?.first ?: "none")
+    LaunchedEffect(Unit) { delay(120); runCatching { fr.requestFocus() } }
+    Box(Modifier.fillMaxSize()) {
+        Column(
+            Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(horizontal = 40.u, vertical = 28.u)
+                .clip(RoundedCornerShape(24.u)).background(Color(0xDD101C2E)).padding(18.u)
+        ) {
+            T("انتخاب پس‌زمینه  (OK: انتخاب   •   Back: بستن)", 16, Color.White, FontWeight.Bold)
+            VS(12)
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(14.u), contentPadding = PaddingValues(6.u)) {
+                items(entries, key = { it.first }) { (name, id) ->
+                    val bmp = remember(id) { if (id != 0) loadScaled(ctx, id, 480) else null }
+                    var focused by remember(name) { mutableStateOf(false) }
+                    val shape = RoundedCornerShape(14.u)
+                    Box(
+                        Modifier.width(200.u).height(112.u).clip(shape)
+                            .background(Brush.verticalGradient(listOf(Color(0xFF86B6E8), Color(0xFFCFE3F6))))
+                            .then(if (name == cur) Modifier.focusRequester(fr) else Modifier)
+                            .border(
+                                if (focused) 4.u else if (name == cur) 3.u else 1.u,
+                                if (focused) Color.White else if (name == cur) Color(0xFF3D8BFF) else Color.White.copy(0.4f),
+                                shape
+                            )
+                            .onFocusChanged { focused = it.isFocused }
+                            .tap { onPick(name) }
+                    ) {
+                        if (bmp != null) {
+                            Image(bmp, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                        } else {
+                            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { T("ساده", 14, Color(0xFF1F3A5F)) }
+                        }
+                        if (name == cur) {
+                            Box(
+                                Modifier.align(Alignment.TopStart).padding(6.u).size(22.u).clip(CircleShape).background(Color(0xFF3D8BFF)),
+                                contentAlignment = Alignment.Center
+                            ) { T("✓", 14, Color.White, FontWeight.Bold) }
+                        }
+                    }
+                }
+            }
         }
     }
 }
