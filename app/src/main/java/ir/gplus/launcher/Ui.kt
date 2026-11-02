@@ -6,6 +6,12 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
+import android.graphics.SurfaceTexture
+import android.media.MediaPlayer
+import android.view.Surface
+import android.view.TextureView
+import android.widget.Toast
+import java.io.File
 import android.graphics.Outline
 import android.media.tv.TvContract
 import android.media.tv.TvInputManager
@@ -15,7 +21,13 @@ import android.net.Uri
 import android.view.View
 import android.view.ViewOutlineProvider
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -43,6 +55,8 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
@@ -77,6 +91,7 @@ import android.view.KeyEvent as AKey
 // ───────────── تنظیمات ظاهری ─────────────
 val Ink = Color(0xFF1F3A5F)
 val LocalFont = compositionLocalOf<FontFamily> { FontFamily.Default }
+const val LIVE_PREVIEW = false   // false = به‌جای پخش زنده، انیمیشن لوپ نشان بده
 const val PREVIEW_VOLUME = 0f                  // صدای پیش‌نمایش داخل کادر (۰ = بی‌صدا، ۱ = صدا)
 
 enum class Screen { Home, Apps }
@@ -235,7 +250,7 @@ private fun Launcher(sw: Int, sh: Int, resumed: Boolean, homeSignal: Int, reload
         channelsFor = inp.id
     }
     // پخش
-    val videoActive = resumed && (fullscreen || screen == Screen.Home)
+    val videoActive = LIVE_PREVIEW && resumed && (fullscreen || screen == Screen.Home)
     LaunchedEffect(videoActive, inputId, inputs.size, channels, channelsFor, chIdx) {
         val inp = inputs.firstOrNull { it.id == inputId }
         if (!videoActive || inp == null) { tvView.reset(); return@LaunchedEffect }
@@ -330,9 +345,23 @@ private fun Launcher(sw: Int, sh: Int, resumed: Boolean, homeSignal: Int, reload
         prefs.edit().remove("pinned").apply()
     }
     fun openLive() {
-        if (tunerBlocked && liveApp != null) launchApp(ctx, liveApp) else fullscreen = true
+        if (!LIVE_PREVIEW) {
+            if (liveApp != null) launchApp(ctx, liveApp)
+            else Toast.makeText(ctx, "برنامه‌ی تلویزیون پیدا نشد", Toast.LENGTH_SHORT).show()
+        } else if (tunerBlocked && liveApp != null) launchApp(ctx, liveApp) else fullscreen = true
     }
-    val bgId = remember { ctx.resources.getIdentifier("bg", "drawable", ctx.packageName) }
+    val bgId = remember { findRes(ctx, "drawable", listOf("bg", "background", "wallpaper")) }
+    LaunchedEffect(Unit) {
+        val missing = buildList {
+            if (bgId == 0) add("پس‌زمینه (bg)")
+            if (findRes(ctx, "drawable", WEATHER_NAMES) == 0) add("عکس هوا (weather_bg)")
+            if (findRes(ctx, "font", DIPLOMAT_NAMES) == 0) add("فونت (diplomat)")
+        }
+        if (missing.isNotEmpty()) {
+            delay(1500)
+            Toast.makeText(ctx, "داخل برنامه پیدا نشد: " + missing.joinToString("، "), Toast.LENGTH_LONG).show()
+        }
+    }
     val logoId = remember { ctx.resources.getIdentifier("logo", "drawable", ctx.packageName) }
 
     Box(Modifier.fillMaxSize()) {
@@ -341,8 +370,8 @@ private fun Launcher(sw: Int, sh: Int, resumed: Boolean, homeSignal: Int, reload
         if (!fullscreen) {
             when (screen) {
                 Screen.Home -> HomeScreen(
-                    now, online, weather, inputs, inputId, popular, logoId, tileFr,
-                    onPickInput = { showPicker = true },
+                    now, online, weather, inputs, inputId, popular, logoId, tileFr, resumed,
+                    onPickInput = { if (LIVE_PREVIEW) showPicker = true },
                     onTileBounds = { tileRect = it },
                     onTileFocus = { tileFocused = it },
                     onFullscreen = { openLive() },
@@ -356,7 +385,7 @@ private fun Launcher(sw: Int, sh: Int, resumed: Boolean, homeSignal: Int, reload
         }
 
         // لایه‌ی ویدیو (یک TvView برای هر دو حالت کادر و تمام‌صفحه)
-        val showVideo = fullscreen || (screen == Screen.Home && tileRect.width > 0f)
+        val showVideo = fullscreen || (LIVE_PREVIEW && screen == Screen.Home && tileRect.width > 0f)
         val r = if (fullscreen) Rect(0f, 0f, sw.toFloat(), sh.toFloat()) else tileRect
         val w = with(density) { r.width.toDp() }
         val h = with(density) { r.height.toDp() }
@@ -466,12 +495,13 @@ private fun Background(bgId: Int) {
 @Composable
 private fun HomeScreen(
     now: Date, online: Boolean, weather: Weather?, inputs: List<TvInput>, inputId: String?,
-    popular: List<AppEntry>, logoId: Int, tileFr: FocusRequester,
+    popular: List<AppEntry>, logoId: Int, tileFr: FocusRequester, resumed: Boolean,
     onPickInput: () -> Unit, onTileBounds: (Rect) -> Unit, onTileFocus: (Boolean) -> Unit,
     onFullscreen: () -> Unit, onApps: () -> Unit, onSettings: () -> Unit, onSearch: () -> Unit,
     onLaunch: (AppEntry) -> Unit
 ) {
     val longPressed = remember { mutableStateOf(false) }
+    val tileHasFocus = remember { mutableStateOf(false) }
     Column(Modifier.fillMaxSize().padding(horizontal = 40.u, vertical = 20.u)) {
         TopBar(now, online, logoId, onSearch, onSettings)
         VS(14)
@@ -496,9 +526,11 @@ private fun HomeScreen(
                             }
                         }
                         .focusRequester(tileFr)
-                        .onFocusChanged { onTileFocus(it.isFocused) }
+                        .onFocusChanged { onTileFocus(it.isFocused); tileHasFocus.value = it.isFocused }
                         .tap(onFullscreen)
-                )
+                ) {
+                    if (!LIVE_PREVIEW) LoopTile(resumed, tileHasFocus.value, Modifier.fillMaxSize())
+                }
             }
             HS(24)
             WeatherCard(Modifier.width(280.u).fillMaxHeight(), weather)
@@ -606,7 +638,7 @@ private fun InputChips(inputs: List<TvInput>, selected: String?, onPick: (String
 @Composable
 private fun WeatherCard(modifier: Modifier, w: Weather?) {
     val ctx = LocalContext.current
-    val wid = remember { ctx.resources.getIdentifier("weather_bg", "drawable", ctx.packageName) }
+    val wid = remember { findRes(ctx, "drawable", WEATHER_NAMES) }
     val wbmp = remember(wid) { if (wid != 0) loadScaled(ctx, wid, 800) else null }
     Box(modifier.glass(24, 0.26f)) {
     if (wbmp != null) {
@@ -792,20 +824,169 @@ private fun InputPicker(inputs: List<TvInput>, selected: String?, onOpenLive: ((
 /** اگر فایل‌های diplomat.ttf (و اختیاری diplomat_bold.ttf) در res/font باشند استفاده می‌شوند. */
 private fun loadFont(ctx: Context): FontFamily {
     val r = ctx.resources
-    val reg = r.getIdentifier("diplomat", "font", ctx.packageName)
-    val bold = r.getIdentifier("diplomat_bold", "font", ctx.packageName)
+    val reg = findRes(ctx, "font", DIPLOMAT_NAMES)
+    val bold = findRes(ctx, "font", listOf("diplomat_bold", "bold"))
     val list = mutableListOf<Font>()
     if (reg != 0) list += Font(reg, FontWeight.Normal)
     if (bold != 0) list += Font(bold, FontWeight.Bold)
     return if (list.isEmpty()) FontFamily.Default else FontFamily(list)
 }
 
+private val WEATHER_NAMES = listOf("weather_bg", "weather", "weather_card")
+private val DIPLOMAT_NAMES = listOf("diplomat", "diplomat_regular", "regular")
+
+private fun findRes(ctx: Context, type: String, names: List<String>): Int {
+    for (n in names) {
+        val id = ctx.resources.getIdentifier(n, type, ctx.packageName)
+        if (id != 0) return id
+    }
+    return 0
+}
+
 /** عکس بزرگ (حتی 4K) را کوچک‌تر می‌خواند تا حافظه‌ی تلویزیون پر نشود. */
-private fun loadScaled(ctx: Context, resId: Int, maxW: Int): ImageBitmap? = runCatching {
+private fun loadScaled(ctx: Context, resId: Int, maxW: Int): ImageBitmap? {
     val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-    BitmapFactory.decodeResource(ctx.resources, resId, o)
+    runCatching { BitmapFactory.decodeResource(ctx.resources, resId, o) }
     var sample = 1
-    while (o.outWidth / (sample * 2) >= maxW) sample *= 2
-    val o2 = BitmapFactory.Options().apply { inSampleSize = sample }
-    BitmapFactory.decodeResource(ctx.resources, resId, o2)?.asImageBitmap()
-}.getOrNull()
+    while (o.outWidth > 0 && o.outWidth / (sample * 2) >= maxW) sample *= 2
+    repeat(3) {
+        val r = runCatching {
+            BitmapFactory.decodeResource(ctx.resources, resId, BitmapFactory.Options().apply { inSampleSize = sample })
+        }.getOrNull()
+        if (r != null) return r.asImageBitmap()
+        sample *= 2
+    }
+    return null
+}
+
+// ───────────── انیمیشن لوپ به‌جای پخش زنده ─────────────
+/** اگر فایل res/raw/loop.mp4 باشد همان را بی‌صدا و بی‌نهایت پخش می‌کند، وگرنه صحنه‌ی پیش‌فرض را. */
+@Composable
+private fun LoopTile(playing: Boolean, focused: Boolean, modifier: Modifier) {
+    val ctx = LocalContext.current
+    val rawId = remember { findRes(ctx, "raw", listOf("loop")) }
+    Box(modifier.clip(RoundedCornerShape(24.u))) {
+        if (rawId != 0) {
+            AndroidView(
+                factory = { LoopView(it, rawId) },
+                modifier = Modifier.fillMaxSize(),
+                update = { v -> v.setPlaying(playing) }
+            )
+        } else {
+            DefaultLoopScene(Modifier.fillMaxSize())
+        }
+        Box(
+            Modifier.align(Alignment.BottomCenter).fillMaxWidth()
+                .background(Brush.verticalGradient(listOf(Color.Transparent, Color(0xAA000000))))
+                .padding(horizontal = 18.u, vertical = 12.u)
+        ) {
+            Column {
+                T("تلویزیون زنده", 20, Color.White, FontWeight.Bold)
+                if (focused) T("OK: باز کردن برنامه‌ی تلویزیون", 12, Color.White.copy(0.85f))
+            }
+        }
+        if (focused) Box(Modifier.fillMaxSize().border(4.u, Color.White, RoundedCornerShape(24.u)))
+    }
+}
+
+private class LoopView(ctx: Context, private val resId: Int) : TextureView(ctx), TextureView.SurfaceTextureListener {
+    private var mp: MediaPlayer? = null
+    private var surface: Surface? = null
+    private var wantPlay = true
+
+    init { surfaceTextureListener = this }
+
+    override fun onSurfaceTextureAvailable(st: SurfaceTexture, w: Int, h: Int) {
+        runCatching {
+            val f = File(context.cacheDir, "loop.mp4")
+            val upd = context.packageManager.getPackageInfo(context.packageName, 0).lastUpdateTime
+            if (!f.exists() || f.lastModified() < upd) {
+                resources.openRawResource(resId).use { i -> f.outputStream().use { o -> i.copyTo(o) } }
+            }
+            val sf = Surface(st)
+            surface = sf
+            mp = MediaPlayer().apply {
+                setDataSource(f.absolutePath)
+                setSurface(sf)
+                isLooping = true
+                setVolume(0f, 0f)
+                runCatching { setVideoScalingMode(MediaPlayer.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING) }
+                setOnPreparedListener { p ->
+                    runCatching { p.setVideoScalingMode(MediaPlayer.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING) }
+                    if (wantPlay) p.start()
+                }
+                setOnErrorListener { _, _, _ -> true }
+                prepareAsync()
+            }
+        }
+    }
+
+    override fun onSurfaceTextureSizeChanged(st: SurfaceTexture, w: Int, h: Int) {}
+    override fun onSurfaceTextureUpdated(st: SurfaceTexture) {}
+    override fun onSurfaceTextureDestroyed(st: SurfaceTexture): Boolean {
+        runCatching { mp?.release() }
+        mp = null
+        runCatching { surface?.release() }
+        surface = null
+        return true
+    }
+
+    fun setPlaying(play: Boolean) {
+        wantPlay = play
+        runCatching { if (play) mp?.start() else mp?.pause() }
+    }
+}
+
+@Composable
+private fun DefaultLoopScene(modifier: Modifier) {
+    val t by rememberInfiniteTransition(label = "scene").animateFloat(
+        initialValue = 0f, targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(90_000, easing = LinearEasing)), label = "t"
+    )
+    Canvas(modifier) {
+        val w = size.width
+        val h = size.height
+        drawRect(
+            Brush.verticalGradient(
+                listOf(Color(0xFF2C5282), Color(0xFF6FA0D8), Color(0xFFF4C9A3), Color(0xFFFFE6BE)),
+                startY = 0f, endY = h * 0.8f
+            )
+        )
+        val sun = Offset(w * 0.74f, h * 0.5f)
+        drawCircle(
+            Brush.radialGradient(listOf(Color(0xE6FFF3CF), Color.Transparent), center = sun, radius = h * 0.55f),
+            radius = h * 0.55f, center = sun
+        )
+        // ابرهای دور (هر ابر در هر دور عدد صحیحی از عرض را طی می‌کند، پس لوپ بی‌درز است)
+        for (i in 0 until 5) {
+            val k = if (i % 2 == 0) 1 else 2
+            val cw = w * (0.22f + 0.04f * (i % 3))
+            val x = (((i * 0.21f) + t * k) % 1f) * (w + cw * 2) - cw
+            val y = h * (0.08f + 0.09f * i)
+            val a = 0.35f + 0.08f * (i % 3)
+            drawOval(Color.White.copy(a), Offset(x, y), Size(cw, cw * 0.28f))
+            drawOval(Color.White.copy(a), Offset(x + cw * 0.2f, y - cw * 0.08f), Size(cw * 0.6f, cw * 0.28f))
+        }
+        val far = Path().apply {
+            moveTo(0f, h); lineTo(0f, h * 0.7f)
+            lineTo(w * 0.16f, h * 0.52f); lineTo(w * 0.28f, h * 0.64f); lineTo(w * 0.46f, h * 0.38f)
+            lineTo(w * 0.62f, h * 0.62f); lineTo(w * 0.8f, h * 0.46f); lineTo(w, h * 0.66f)
+            lineTo(w, h); close()
+        }
+        drawPath(far, Brush.verticalGradient(listOf(Color(0xFF6B86AA), Color(0xFF9DB2CE)), startY = h * 0.38f, endY = h))
+        val near = Path().apply {
+            moveTo(0f, h); lineTo(0f, h * 0.82f)
+            cubicTo(w * 0.2f, h * 0.7f, w * 0.38f, h * 0.9f, w * 0.55f, h * 0.8f)
+            cubicTo(w * 0.72f, h * 0.7f, w * 0.88f, h * 0.88f, w, h * 0.78f)
+            lineTo(w, h); close()
+        }
+        drawPath(near, Color(0xFF35566E))
+        // ابرهای نزدیک جلوی کوه‌ها
+        for (i in 0 until 3) {
+            val cw = w * 0.34f
+            val x = (((i * 0.37f) + t * 3) % 1f) * (w + cw * 2) - cw
+            val y = h * (0.55f + 0.1f * i)
+            drawOval(Color.White.copy(0.28f), Offset(x, y), Size(cw, cw * 0.22f))
+        }
+    }
+}
